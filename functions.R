@@ -24,7 +24,7 @@
     if (tools::md5sum(dst) == md5sum)
       break
     if ((rt <- rt + 1) == retries) {
-      warning("Max. retries reached for file ", dl[i]$name)
+      warning("Max. retries reached for file ", basename(dst))
       break
     }
   }
