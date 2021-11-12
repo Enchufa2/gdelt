@@ -31,17 +31,18 @@
   file.exists(dst)
 }
 
-filter_data <- function(expr, cache=TRUE, retries=3) {
+.reader <- coro::generator(function(years=NULL, cache=TRUE, retries=3) {
   dir.create(.cache.path, showWarnings=FALSE, recursive=TRUE)
-  dir.create(.results.path, showWarnings=FALSE, recursive=TRUE)
-  expr <- substitute(expr)
 
   files <- vroom::vroom(
     file.path(.events.url, "md5sums"),
     delim="  ", col_names=c("md5sum", "name"), col_types="cc")[-1, ]
   files$year <- as.integer(substr(files$name, 1, 4))
 
-  for (i in unique(files$year)) {
+  if (is.null(years))
+    years <- unique(files$year)
+
+  for (i in years) {
     message("Processing ", i, "...")
     files.year <- subset(files, year == i)
 
@@ -57,13 +58,47 @@ filter_data <- function(expr, cache=TRUE, retries=3) {
         next
 
       df <- vroom::vroom(unz(dst, name), col_names=.cnames, col_types=.ctypes)
-      df <- subset(df, eval(expr))
+      coro::yield(list(df=df, append=append, year=i))
 
-      res <- file.path(.results.path, paste0(i, ".csv.gz"))
-      vroom::vroom_write(df, res, append=append)
       append <- TRUE
-
       if (!cache) unlink(dst)
     }
   }
+})
+
+gdelt_filter <- function(expr, years=NULL, cache=TRUE, retries=3) {
+  dir.create(.results.path, showWarnings=FALSE, recursive=TRUE)
+  expr <- substitute(expr)
+
+  coro::loop(for (obj in .reader(years, cache, retries)) {
+    df <- subset(obj$df, eval(expr))
+    res <- file.path(.results.path, paste0(obj$year, ".csv.gz"))
+    vroom::vroom_write(df, res, append=obj$append)
+  })
+}
+
+gdelt_aggregate <- function(...) {
+  files <- dir(.results.path, full.names=TRUE)
+  stopifnot(length(files) > 0)
+  vars <- as.character(match.call()[-1L])
+
+  df <- dplyr::bind_rows(lapply(files, vroom::vroom, col_types=.ctypes))
+  df <- dplyr::group_by(df, MonthYear)
+  for (var in vars) df <- dplyr::group_by(df, .data[[var]], .add=TRUE)
+
+  df <- dplyr::summarise(
+    df, .groups="drop",
+    n_events = dplyr::n(),
+    avg_importance = sum(IsRootEvent) / n_events,
+    avg_stability = sum(GoldsteinScale) / n_events,
+    avg_context = sum(AvgTone) / n_events,
+    total_impact = sum(NumMentions)
+  )
+
+  df <- dplyr::mutate(df, MonthYear = lubridate::ym(MonthYear))
+  df <- dplyr::mutate(df, Month = as.integer(lubridate::month(MonthYear)))
+  df <- dplyr::mutate(df, Year = as.integer(lubridate::year(MonthYear)))
+  df <- dplyr::select(df, -MonthYear)
+  df <- dplyr::relocate(df, Year, Month)
+  dplyr::filter(df, Year >= 1979)
 }
